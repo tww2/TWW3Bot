@@ -1,9 +1,12 @@
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.Socket;
+import java.util.NoSuchElementException;
 import java.util.Scanner;
 
-public class IRCConnection
+
+public class IRCConnection implements Closeable
 {
 	private Socket ircSocket;
 	private String hostName;
@@ -12,7 +15,7 @@ public class IRCConnection
 	private String password;
 	private Scanner socketInput;
 	private PrintStream socketOutput;
-	private long floodControl;
+	private boolean closed;
 	
 	public IRCConnection(String hostName, int port, String userName, String password)
 	{
@@ -20,19 +23,14 @@ public class IRCConnection
 		this.port = port;
 		this.userName = userName;
 		this.password = password;
-		this.reconnect();
-		this.floodControl = 0;
+		this.connect();
 	}
 	
-	public void reconnect()
+	private void connect()
 	{
 		try
 		{
-			if(ircSocket != null)
-			{
-				closeConnection();
-			}
-		
+			System.err.println(this);
 			ircSocket = new Socket(hostName, port);
 			socketInput = new Scanner(ircSocket.getInputStream());
 			socketOutput = new PrintStream(ircSocket.getOutputStream());
@@ -42,107 +40,83 @@ public class IRCConnection
 		} catch (IOException e)
 		{
 			e.printStackTrace();
+			this.close();
 		}
 	}
 	
-	public void closeConnection()
+	public void close()
 	{
+		if(this.isClosed())
+		{
+			//no-op already closed
+			return;
+		}
+		
 		try
 		{
 			if(ircSocket != null)
 			{
-				socketInput.close();
-				socketOutput.close();
 				ircSocket.close();
-				socketInput = null;
-				socketOutput = null;
-				ircSocket = null;
+				this.closed = true;
 			}
 		} catch (IOException e)
 		{
+			System.err.printf("Error closing %1s\n", this.toString());
 			e.printStackTrace();
 		}
 	}
 	
-	public IRCMessage readMessage()
+	public boolean isClosed()
 	{
-		IRCMessage ret = null;
-		
-		//TODO revisit this loop design... seems like there should be a smarter way to do this
-		do
-		{
-			String message = socketInput.nextLine();
-			String[] readArray = message.split(":", 3);
-			if(readArray[0].equals("PING "))
-			{
-				socketOutput.println("PONG :" + readArray[1]);
-			} else if (readArray.length > 1) {
-				String[] cmdLine = readArray[1].split(" ");
-				if(cmdLine.length > 1)
-				{
-					String sender = cmdLine[0];
-					String command = cmdLine[1];
-					
-					/********************************************************
-					 *														*
-					 *						COMMANDS						*
-					 *														*
-					 ********************************************************/
-					if(command.equals("PRIVMSG"))
-					{
-						if(sender.indexOf('!') >= 0)
-						{
-							sender = sender.substring(0, sender.indexOf('!'));
-						}
-						String target = cmdLine[2];
-						String mes = "";
-						for(int i=2; i<readArray.length; ++i)
-						{
-							mes += readArray[i];
-						}
-						
-						System.out.println(sender + "@" + target + ": " + mes);
-						ret = new IRCMessage(sender, target, mes);
-					} else {
-						System.out.println(command + " ~~~ " + message);
-					}
-					
-					/******************END OF COMMANDS *********************/
-					
-				} else {
-					System.out.println("NOCOMMAND! ~~~ " + message);
-				}
-			} else {
-				System.out.println("NOCOLON! ~~~ " + message);
-			}
-		}while (ret == null);
-		
-		return ret;
+		return this.closed;
 	}
 	
-	public void sendMessage(String target, String message)
+	public String nextMessage() throws IOException
 	{
+		if(this.isClosed() || ircSocket.isInputShutdown())
+		{
+			this.close();
+			throw new IOException(String.format("Tried to read from %1s, but it is closed.", this.toString()));
+		}
+		
+		//Returns only non-ping messages from the server
 		try
 		{
-			long offset = System.currentTimeMillis() - floodControl;
-			if(offset < 5000L)
+			while(true)
 			{
-				Thread.sleep(5000L - offset);
+				String message = socketInput.nextLine();
+				//System.err.println(message);
+				String[] readArray = message.split(":", 2);
+				if(readArray[0].equals("PING "))
+				{
+					this.sendMessage("PONG :" + readArray[1]);
+				} else 
+				{
+					return message;
+				}
 			}
-			
-			socketOutput.println("PRIVMSG " + target + " :" + message);
-			System.out.println("PRIVMSG " + target + " :" + message);
-			
-			floodControl = System.currentTimeMillis();
-			
-		} catch (InterruptedException e)
+		}catch (NoSuchElementException e)
 		{
-			System.err.println(e);
+			this.close();
+			throw new IOException(String.format("Tried to read from %1s, but it is closed.", this.toString()), e);
 		}
 	}
 	
-	public void joinChannel(String channel)
+	public void sendMessage(String message) throws IOException
 	{
-		socketOutput.println("JOIN " + channel);
+		if(this.isClosed() || ircSocket.isOutputShutdown())
+		{
+			this.close();
+			throw new IOException(String.format("Tried to write to %1s, but it is closed.", this.toString()));
+		}
+
+		socketOutput.println(message);
+		System.out.println(message);
+	}
+	
+	@Override
+	public String toString()
+	{
+		return String.format("IRCConnection to %1s on port %2s with account %3s.", hostName, port, userName);
 	}
 }
